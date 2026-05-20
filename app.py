@@ -22,6 +22,7 @@ _COLOR_RGB: dict[str, tuple[int, int, int]] = {
     "purple": (168,  85, 247),
     "orange": (249, 115,  22),
     "red":    (239,  68,  68),
+    "layout": (107, 114, 128),  # layout 行ボックス用グレー
 }
 _COLOR_HEX: dict[str, str] = {
     "green":  "#22C55E",
@@ -29,129 +30,21 @@ _COLOR_HEX: dict[str, str] = {
     "purple": "#A855F7",
     "orange": "#F97316",
     "red":    "#EF4444",
+    "layout": "#6B7280",
 }
 
 _FIELD_LABELS: dict[str, str] = dict(DISPLAY_FIELDS)
 
-# 3列グリッド用の並び順
-_FIELD_GRID: list[tuple[str, str, str]] = [
-    ("vendor_name",   "customer_name",  "invoice_id"),
-    ("invoice_date",  "due_date",       "invoice_total"),
-    ("sub_total",     "total_tax",      "amount_due"),
-]
 
-
-# ─── UI ヘルパー ──────────────────────────────────────────
-def _confidence_badge(confidence: float | None) -> str:
-    """信頼度を色付きHTMLバッジとして返す。"""
-    if confidence is None:
-        return '<span style="background:#6B7280;color:white;padding:1px 5px;border-radius:3px;font-size:11px">N/A</span>'
-    if confidence >= CONFIDENCE_HIGH:
-        color = "#22C55E"
-        icon = "✓"
-    elif confidence >= CONFIDENCE_MID:
-        color = "#F97316"
-        icon = "⚠"
-    else:
-        color = "#EF4444"
-        icon = "✗"
-    return (
-        f'<span style="background:{color};color:white;'
-        f'padding:1px 5px;border-radius:3px;font-size:11px">'
-        f'{icon} {confidence:.0%}</span>'
-    )
-
-
-def _show_fields_basic(result: dict):
-    """信頼度なしで主要フィールドを st.metric グリッド表示。"""
-    for row in _FIELD_GRID:
-        cols = st.columns(3)
-        for col, key in zip(cols, row):
-            field = result.get(key) or {}
-            col.metric(_FIELD_LABELS[key], field.get("value") or "—")
-
-
-def _show_fields_with_confidence(result: dict):
-    """信頼度バッジ付きで主要フィールドを表示。"""
-    # 凡例
-    st.markdown(
-        "信頼度: "
-        '<span style="background:#22C55E;color:white;padding:1px 5px;border-radius:3px;font-size:11px">✓ 高（≥90%）</span> '
-        '<span style="background:#F97316;color:white;padding:1px 5px;border-radius:3px;font-size:11px">⚠ 中（70-89%）</span> '
-        '<span style="background:#EF4444;color:white;padding:1px 5px;border-radius:3px;font-size:11px">✗ 低（<70%）</span>',
-        unsafe_allow_html=True,
-    )
-    st.divider()
-
-    for row in _FIELD_GRID:
-        cols = st.columns(3)
-        for col, key in zip(cols, row):
-            field = result.get(key) or {}
-            value = field.get("value") or "—"
-            badge = _confidence_badge(field.get("confidence"))
-            col.markdown(
-                f"**{_FIELD_LABELS[key]}**  \n{value} {badge}",
-                unsafe_allow_html=True,
-            )
-        st.write("")  # 行間スペース
-
-
-def _show_items(result: dict):
-    """明細テーブルを表示。"""
-    if result.get("items"):
-        st.subheader("明細")
-        st.dataframe(
-            pd.DataFrame(result["items"]),
-            use_container_width=True,
-            hide_index=True,
-        )
-    else:
-        st.info("明細行は検出されませんでした。")
-
-
-def _show_raw(result: dict):
-    """生データをトグルで表示。"""
-    with st.expander("生データ（JSON）"):
-        st.json(result.get("raw_fields", {}))
-
-
-def _show_comparison(inv: dict, lay: dict):
-    """全パターンを横並びで比較するテーブルを表示。"""
-    st.subheader("フィールド比較")
-    st.caption("Invoice 基本・信頼度付き・Layout+正規表現 の3パターンを並べて表示します。")
-
-    rows = []
-    for key, label in DISPLAY_FIELDS:
-        inv_f = inv.get(key) or {}
-        lay_f = lay.get(key) or {}
-
-        inv_val  = inv_f.get("value") or "—"
-        inv_conf = inv_f.get("confidence")
-        lay_val  = lay_f.get("value") or "—"
-
-        # 信頼度の表示文字列
-        if inv_conf is not None:
-            if inv_conf >= CONFIDENCE_HIGH:
-                conf_str = f"✅ {inv_val} ({inv_conf:.0%})"
-            elif inv_conf >= CONFIDENCE_MID:
-                conf_str = f"⚠️ {inv_val} ({inv_conf:.0%})"
-            else:
-                conf_str = f"❌ {inv_val} ({inv_conf:.0%})"
-        else:
-            conf_str = inv_val
-
-        rows.append({
-            "フィールド":          label,
-            "Invoice 基本":        inv_val,
-            "Invoice + 信頼度":    conf_str,
-            "Layout + 正規表現":   lay_val,
-        })
-
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-
+# ─── 描画ヘルパー ─────────────────────────────────────────
 def _render_page(pdf_bytes: bytes, page_num: int, boxes: list[dict]) -> Image.Image:
-    """PDF の 1 ページをラスタライズしてバウンディングボックスを描画する。"""
+    """
+    PDF の 1 ページをラスタライズしてボックスを描画する。
+
+    boxes の各要素に "style" キーを持たせることで描画スタイルを切り替える:
+      "filled"  → 半透明塗り + 色枠（Invoice フィールドボックス）
+      "outline" → 枠線のみ（Layout 行ボックス）
+    """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     page = doc[page_num - 1]
     pix = page.get_pixmap(matrix=fitz.Matrix(DPI / 72, DPI / 72))
@@ -162,12 +55,16 @@ def _render_page(pdf_bytes: bytes, page_num: int, boxes: list[dict]) -> Image.Im
     draw = ImageDraw.Draw(overlay)
 
     for box in boxes:
-        if box["page"] != page_num or not box["polygon"]:
+        if box["page"] != page_num or not box.get("polygon"):
             continue
         poly = box["polygon"]
         pts = [(poly[i] * DPI, poly[i + 1] * DPI) for i in range(0, len(poly), 2)]
-        rgb = _COLOR_RGB.get(box["color"], (255, 0, 0))
-        draw.polygon(pts, fill=rgb + (50,), outline=rgb + (230,))
+        rgb = _COLOR_RGB.get(box.get("color", "layout"), (107, 114, 128))
+
+        if box.get("style", "filled") == "outline":
+            draw.polygon(pts, outline=rgb + (160,))
+        else:
+            draw.polygon(pts, fill=rgb + (50,), outline=rgb + (230,))
 
     return Image.alpha_composite(base, overlay).convert("RGB")
 
@@ -179,43 +76,112 @@ def _page_count(pdf_bytes: bytes) -> int:
     return n
 
 
-def _show_visualization(pdf_bytes: bytes, boxes: list[dict]):
-    """PDF 画像 + バウンディングボックスを表示。"""
-    n_pages = _page_count(pdf_bytes)
+def _render_all_pages(pdf_bytes: bytes, boxes: list[dict]) -> list[Image.Image]:
+    return [_render_page(pdf_bytes, p, boxes) for p in range(1, _page_count(pdf_bytes) + 1)]
 
-    for page_num in range(1, n_pages + 1):
-        page_boxes = [b for b in boxes if b["page"] == page_num]
 
-        if n_pages > 1:
-            st.subheader(f"ページ {page_num}")
+# ─── UI ヘルパー ──────────────────────────────────────────
+def _confidence_badge(confidence: float | None) -> str:
+    if confidence is None:
+        return '<span style="background:#6B7280;color:white;padding:1px 5px;border-radius:3px;font-size:11px">N/A</span>'
+    if confidence >= CONFIDENCE_HIGH:
+        color, icon = "#22C55E", "✓"
+    elif confidence >= CONFIDENCE_MID:
+        color, icon = "#F97316", "⚠"
+    else:
+        color, icon = "#EF4444", "✗"
+    return (
+        f'<span style="background:{color};color:white;'
+        f'padding:1px 5px;border-radius:3px;font-size:11px">'
+        f'{icon} {confidence:.0%}</span>'
+    )
 
-        img_col, legend_col = st.columns([3, 1])
 
-        with img_col:
-            img = _render_page(pdf_bytes, page_num, page_boxes)
-            st.image(img, use_container_width=True)
+def _show_pdf_column(images: list[Image.Image]):
+    """左カラム: PDF 各ページ画像を表示。"""
+    for i, img in enumerate(images):
+        if len(images) > 1:
+            st.caption(f"ページ {i + 1}")
+        st.image(img, use_container_width=True)
 
-        with legend_col:
-            st.markdown("**検出フィールド**")
-            if page_boxes:
-                for box in page_boxes:
-                    hex_color = _COLOR_HEX.get(box["color"], "#888")
-                    st.markdown(
-                        f'<span style="color:{hex_color}">■</span> '
-                        f'**{box["label"]}**  \n{box["value"]}',
-                        unsafe_allow_html=True,
-                    )
-            else:
-                st.info("このページに検出フィールドはありません。")
 
-        if page_num < n_pages:
-            st.divider()
+def _show_invoice_panel(result: dict):
+    """右パネル: Invoice フィールド（信頼度バッジ付き）+ 明細 + 生JSON。"""
+    st.markdown(
+        "**信頼度凡例:** "
+        '<span style="background:#22C55E;color:white;padding:1px 5px;border-radius:3px;font-size:11px">✓ ≥90%</span> '
+        '<span style="background:#F97316;color:white;padding:1px 5px;border-radius:3px;font-size:11px">⚠ 70-89%</span> '
+        '<span style="background:#EF4444;color:white;padding:1px 5px;border-radius:3px;font-size:11px">✗ <70%</span>',
+        unsafe_allow_html=True,
+    )
+    st.divider()
+
+    for key, label in DISPLAY_FIELDS:
+        field = result.get(key) or {}
+        value = field.get("value") or "—"
+        badge = _confidence_badge(field.get("confidence"))
+        st.markdown(f"**{label}**: {value} {badge}", unsafe_allow_html=True)
+
+    if result.get("items"):
+        st.divider()
+        st.markdown("**明細**")
+        st.dataframe(pd.DataFrame(result["items"]), use_container_width=True, hide_index=True)
+
+    with st.expander("生データ（JSON）"):
+        st.json(result.get("raw_fields", {}))
+
+
+def _show_layout_panel(result: dict):
+    """右パネル: Layout + 正規表現フィールド（信頼度なし）+ 全文テキスト。"""
+    st.markdown("**抽出フィールド（正規表現）**")
+    st.divider()
+
+    for key, label in DISPLAY_FIELDS:
+        field = result.get(key) or {}
+        value = field.get("value") or "—"
+        st.markdown(f"**{label}**: {value}", unsafe_allow_html=True)
+
+    with st.expander("抽出テキスト（全文）"):
+        full_text = (result.get("raw_fields") or {}).get("full_text", "")
+        st.text(full_text[:3000] + ("..." if len(full_text) > 3000 else ""))
+
+
+def _show_combined_panel(inv: dict, lay: dict):
+    """右パネル: Invoice vs Layout フィールド比較（一致・不一致を視覚化）。"""
+    st.markdown("**Invoice vs Layout 比較**")
+    st.divider()
+
+    for key, label in DISPLAY_FIELDS:
+        inv_f = inv.get(key) or {}
+        lay_f = lay.get(key) or {}
+        inv_val  = inv_f.get("value") or "—"
+        lay_val  = lay_f.get("value") or "—"
+        inv_conf = inv_f.get("confidence")
+        badge    = _confidence_badge(inv_conf)
+
+        # 一致判定（どちらかが「—」なら比較不能）
+        if inv_val != "—" and lay_val != "—":
+            match_icon = "✓" if inv_val == lay_val else "≠"
+            match_color = "#22C55E" if inv_val == lay_val else "#EF4444"
+        else:
+            match_icon, match_color = "—", "#9CA3AF"
+
+        match_span = (
+            f'<span style="color:{match_color};font-weight:bold">{match_icon}</span>'
+        )
+        st.markdown(
+            f"**{label}** {match_span}  \n"
+            f"Invoice: {inv_val} {badge}  \n"
+            f"Layout:  {lay_val}",
+            unsafe_allow_html=True,
+        )
+        st.write("")
 
 
 # ─── メイン ───────────────────────────────────────────────
 st.set_page_config(page_title="請求書 OCR デモ", layout="wide")
 st.title("請求書 OCR デモ")
-st.caption("Azure Document Intelligence を使った請求書分析 — 複数パターン比較")
+st.caption("Azure Document Intelligence — モデル比較デモ")
 
 uploaded = st.file_uploader("PDF ファイルをアップロードしてください", type=["pdf"])
 
@@ -233,34 +199,36 @@ if uploaded:
             st.error(f"分析に失敗しました: {e}")
             st.stop()
 
-    tab_inv, tab_conf, tab_lay, tab_cmp, tab_viz = st.tabs([
-        "Invoice 基本",
+    tab1, tab2, tab3 = st.tabs([
         "Invoice + 信頼度",
         "Layout + 正規表現",
-        "比較",
-        "可視化",
+        "統合（Invoice + Layout）",
     ])
 
-    with tab_inv:
-        st.subheader("抽出結果（prebuilt-invoice）")
-        _show_fields_basic(inv)
-        _show_items(inv)
-        _show_raw(inv)
+    # ── Tab 1: Invoice + 信頼度 ───────────────────────────
+    with tab1:
+        st.caption("prebuilt-invoice モデル — フィールド単位のボックス（色 = フィールド種別）")
+        img_col, panel_col = st.columns([3, 2])
+        with img_col:
+            _show_pdf_column(_render_all_pages(pdf_bytes, inv["bounding_boxes"]))
+        with panel_col:
+            _show_invoice_panel(inv)
 
-    with tab_conf:
-        st.subheader("抽出結果（prebuilt-invoice + 信頼度スコア）")
-        _show_fields_with_confidence(inv)
-        _show_items(inv)
-        _show_raw(inv)
+    # ── Tab 2: Layout + 正規表現 ─────────────────────────
+    with tab2:
+        st.caption("prebuilt-layout モデル — 行単位のボックス（グレー枠）＋正規表現抽出")
+        img_col, panel_col = st.columns([3, 2])
+        with img_col:
+            _show_pdf_column(_render_all_pages(pdf_bytes, lay["bounding_boxes"]))
+        with panel_col:
+            _show_layout_panel(lay)
 
-    with tab_lay:
-        st.subheader("抽出結果（prebuilt-layout + 正規表現）")
-        _show_fields_basic(lay)
-        _show_raw(lay)
-
-    with tab_cmp:
-        _show_comparison(inv, lay)
-
-    with tab_viz:
-        st.subheader("可視化（prebuilt-invoice バウンディングボックス）")
-        _show_visualization(pdf_bytes, inv["bounding_boxes"])
+    # ── Tab 3: 統合（Invoice + Layout）───────────────────
+    with tab3:
+        st.caption("両モデルのボックスを重ねて表示 — 色付き塗り = Invoice、グレー枠 = Layout行")
+        combined_boxes = inv["bounding_boxes"] + lay["bounding_boxes"]
+        img_col, panel_col = st.columns([3, 2])
+        with img_col:
+            _show_pdf_column(_render_all_pages(pdf_bytes, combined_boxes))
+        with panel_col:
+            _show_combined_panel(inv, lay)

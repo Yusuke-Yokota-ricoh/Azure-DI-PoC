@@ -164,8 +164,9 @@ def analyze_invoice(pdf_bytes: bytes) -> dict:
 
 def analyze_layout_regex(pdf_bytes: bytes) -> dict:
     """
-    prebuilt-layout でテキストを抽出し、正規表現でフィールドを抽出する。
+    prebuilt-layout でテキストと行ボックスを抽出し、正規表現でフィールドを抽出する。
 
+    bounding_boxes には各ページの行単位ボックスを含む（style="outline"）。
     confidence は常に None（スコアなし）。
     """
     client = _make_client()
@@ -181,12 +182,28 @@ def analyze_layout_regex(pdf_bytes: bytes) -> dict:
     full_text = result.content or ""
     out["raw_fields"] = {"full_text": full_text}
 
+    # 正規表現によるフィールド抽出
     for field_key, patterns in _REGEX_PATTERNS.items():
         for pattern in patterns:
             m = re.search(pattern, full_text, re.MULTILINE)
             if m:
                 out[field_key] = {"value": m.group(1).strip(), "confidence": None}
                 break
+
+    # 行単位のバウンディングボックス（layout モデルが認識した全テキスト行）
+    for page in (result.pages or []):
+        page_num = page.page_number if hasattr(page, "page_number") else 1
+        for line in (page.lines or []):
+            polygon = line.polygon if hasattr(line, "polygon") else []
+            content = line.content if hasattr(line, "content") else ""
+            out["bounding_boxes"].append({
+                "label":   content[:20],
+                "value":   content,
+                "page":    page_num,
+                "polygon": polygon or [],
+                "color":   "layout",
+                "style":   "outline",
+            })
 
     return out
 
