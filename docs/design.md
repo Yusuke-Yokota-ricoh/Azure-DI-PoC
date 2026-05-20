@@ -144,17 +144,49 @@ def analyze_invoice(pdf_bytes: bytes) -> dict:
 └──────────────────────────────────────────────┘
 ```
 
+### タブ構成（5タブ）
+
+| タブ | 内容 | データソース |
+|------|------|-------------|
+| Invoice 基本 | フィールド値のみ表示 | `prebuilt-invoice` |
+| Invoice + 信頼度 | フィールド値 + 信頼度バッジ（色分け） | `prebuilt-invoice` |
+| Layout + 正規表現 | レイアウト抽出テキストへの正規表現マッチング結果 | `prebuilt-layout` + regex |
+| 比較 | 全パターンを横並びで比較するテーブル | 上記すべて |
+| 可視化 | PDF 画像 + バウンディングボックス | `prebuilt-invoice` |
+
+### 信頼度バッジの色分け
+
+| 信頼度 | バッジ | 意味 |
+|--------|--------|------|
+| ≥ 0.90 | ✅ 緑 | 高精度 |
+| 0.70〜0.89 | ⚠️ 橙 | 要確認 |
+| < 0.70 | ❌ 赤 | 低精度・手動確認推奨 |
+
+### 並列 API 呼び出し
+
+```
+PDF アップロード
+  ├─→ [Thread 1] prebuilt-invoice → invoice_result
+  └─→ [Thread 2] prebuilt-layout → layout_result（+ 正規表現処理）
+          ↓ 両方完了後
+      5タブを描画
+```
+
+`concurrent.futures.ThreadPoolExecutor` で2つの API 呼び出しを並列実行し、待ち時間を削減する。
+
 ### 実装方針
 
 | 要素 | 使用する Streamlit コンポーネント |
 |------|----------------------------------|
 | ファイルアップロード | `st.file_uploader(type=["pdf"])` |
-| タブ切り替え | `st.tabs(["抽出結果", "可視化"])` |
-| 主要フィールド表示 | `st.metric` を 3 列グリッド |
+| タブ切り替え | `st.tabs([...])` × 5 |
+| 主要フィールド表示（基本/regex） | `st.metric` を 3 列グリッド |
+| 主要フィールド表示（信頼度付き） | `st.markdown` + HTML カラーバッジ |
 | 明細テーブル | `st.dataframe` |
+| 比較テーブル | `st.dataframe`（pandas DataFrame） |
 | 生 JSON | `st.expander` + `st.json` |
 | 可視化画像 | `st.image`（Pillow で描画した PIL Image） |
-| 凡例 | `st.dataframe` または `st.markdown` |
+| 凡例 | `st.markdown` |
 | エラー表示 | `st.error` |
 | 処理中スピナー | `st.spinner` |
 
