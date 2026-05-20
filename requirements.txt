@@ -2,3 +2,5 @@ azure-ai-documentintelligence==1.0.2
 azure-core>=1.30.0
 python-dotenv>=1.0.0
 streamlit>=1.57.0
+pymupdf>=1.24.0
+Pillow>=10.0.0
