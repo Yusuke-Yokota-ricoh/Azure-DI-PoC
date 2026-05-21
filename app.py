@@ -146,33 +146,97 @@ def _show_layout_panel(result: dict):
         st.text(full_text[:3000] + ("..." if len(full_text) > 3000 else ""))
 
 
+def _bbox(polygon: list[float]) -> tuple[float, float, float, float]:
+    """ポリゴン座標から軸並行バウンディングボックスを返す (x_min, y_min, x_max, y_max)。"""
+    xs = polygon[0::2]
+    ys = polygon[1::2]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _overlaps(poly1: list[float], poly2: list[float]) -> bool:
+    """2つのポリゴンが重なるかどうかを判定する（軸並行矩形で近似）。"""
+    x1_min, y1_min, x1_max, y1_max = _bbox(poly1)
+    x2_min, y2_min, x2_max, y2_max = _bbox(poly2)
+    return not (x1_max < x2_min or x2_max < x1_min or y1_max < y2_min or y2_max < y1_min)
+
+
+def _layout_text_at(inv_box: dict, lay_boxes: list[dict]) -> str:
+    """Invoice フィールドボックスと重なる Layout 行のテキストを結合して返す。"""
+    inv_poly = inv_box.get("polygon", [])
+    inv_page = inv_box.get("page", 1)
+    texts = [
+        b["value"]
+        for b in lay_boxes
+        if b.get("page") == inv_page
+        and b.get("polygon")
+        and _overlaps(inv_poly, b["polygon"])
+        and b.get("value")
+    ]
+    return " / ".join(texts) if texts else "—"
+
+
+def _build_combined_boxes(inv_boxes: list[dict], lay_boxes: list[dict]) -> list[dict]:
+    """
+    Invoice ボックス（塗り）＋ Invoice ボックスと重なる Layout 行（枠線・同色）のみを返す。
+    重ならない Layout 行は除外してノイズを減らす。
+    """
+    combined = list(inv_boxes)
+    for lay_box in lay_boxes:
+        lay_poly = lay_box.get("polygon", [])
+        lay_page = lay_box.get("page", 1)
+        for inv_box in inv_boxes:
+            if (inv_box.get("page") == lay_page
+                    and inv_box.get("polygon")
+                    and lay_poly
+                    and _overlaps(inv_box["polygon"], lay_poly)):
+                combined.append({
+                    **lay_box,
+                    "color": inv_box["color"],  # Invoice フィールドと同色の枠線
+                    "style": "outline",
+                })
+                break
+    return combined
+
+
 def _show_combined_panel(inv: dict, lay: dict):
-    """右パネル: Invoice vs Layout フィールド比較（一致・不一致を視覚化）。"""
-    st.markdown("**Invoice vs Layout 比較**")
+    """右パネル: Invoice フィールド位置に重なる Layout テキストを並べて比較。"""
+    st.markdown("**Invoice フィールド位置 × Layout テキスト 比較**")
+    st.caption("Layout 列は、Invoice が検出した同じ座標範囲内にある Layout 行のテキストです。")
     st.divider()
 
+    lay_boxes = lay["bounding_boxes"]
+    # label（日本語）→ Invoice bounding box のマップ
+    boxes_by_label: dict[str, list[dict]] = {}
+    for box in inv["bounding_boxes"]:
+        boxes_by_label.setdefault(box["label"], []).append(box)
+
     for key, label in DISPLAY_FIELDS:
-        inv_f = inv.get(key) or {}
-        lay_f = lay.get(key) or {}
+        inv_f    = inv.get(key) or {}
         inv_val  = inv_f.get("value") or "—"
-        lay_val  = lay_f.get("value") or "—"
         inv_conf = inv_f.get("confidence")
         badge    = _confidence_badge(inv_conf)
 
-        # 一致判定（どちらかが「—」なら比較不能）
-        if inv_val != "—" and lay_val != "—":
-            match_icon = "✓" if inv_val == lay_val else "≠"
-            match_color = "#22C55E" if inv_val == lay_val else "#EF4444"
+        # 同位置の Layout テキスト
+        field_boxes = boxes_by_label.get(label, [])
+        lay_text = _layout_text_at(field_boxes[0], lay_boxes) if field_boxes else "—"
+
+        # 一致判定（空白・記号を除去して部分一致）
+        def _norm(s: str) -> str:
+            return s.replace(" ", "").replace("　", "").replace("¥", "").replace(",", "")
+
+        if inv_val != "—" and lay_text != "—":
+            if _norm(inv_val) in _norm(lay_text) or _norm(lay_text) in _norm(inv_val):
+                match_icon, match_color = "✓", "#22C55E"
+            else:
+                match_icon, match_color = "≠", "#EF4444"
         else:
             match_icon, match_color = "—", "#9CA3AF"
 
-        match_span = (
-            f'<span style="color:{match_color};font-weight:bold">{match_icon}</span>'
-        )
+        match_span = f'<span style="color:{match_color};font-weight:bold">{match_icon}</span>'
         st.markdown(
             f"**{label}** {match_span}  \n"
             f"Invoice: {inv_val} {badge}  \n"
-            f"Layout:  {lay_val}",
+            f"Layout位置: {lay_text}",
             unsafe_allow_html=True,
         )
         st.write("")
@@ -225,8 +289,11 @@ if uploaded:
 
     # ── Tab 3: 統合（Invoice + Layout）───────────────────
     with tab3:
-        st.caption("両モデルのボックスを重ねて表示 — 色付き塗り = Invoice、グレー枠 = Layout行")
-        combined_boxes = inv["bounding_boxes"] + lay["bounding_boxes"]
+        st.caption(
+            "Invoice ボックス（塗り）＋ 同位置の Layout 行（同色枠線）を重ねて表示。"
+            "右パネルは Invoice フィールドと同座標範囲の Layout テキストを比較。"
+        )
+        combined_boxes = _build_combined_boxes(inv["bounding_boxes"], lay["bounding_boxes"])
         img_col, panel_col = st.columns([3, 2])
         with img_col:
             _show_pdf_column(_render_all_pages(pdf_bytes, combined_boxes))
