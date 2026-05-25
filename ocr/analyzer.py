@@ -276,120 +276,62 @@ def analyze_layout_regex(pdf_bytes: bytes) -> dict:
     return out
 
 
-def analyze_layout_gpt(lay_result: dict, pdf_bytes: bytes) -> dict:
+def analyze_layout_gpt(lay_result: dict, gpt_vision_result: dict) -> dict:
     """
-    prebuilt-layout の結果（ボックスリスト＋座標）と PDF 画像を GPT-4o に渡し、
-    各ボックスに自由ラベルを付けつつ既知フィールドを特定する。
+    GPT Vision の抽出結果（フィールド値）と OCR ボックスをテキストマッチングで紐付ける。
 
-    画像を併用することで、請求元/請求先の取り違えなど
-    テキスト座標だけでは判断しにくいケースの精度を改善する。
+    - フィールドの特定は GPT Vision に任せる（請求元/先の誤判定を防ぐ）
+    - OCR ボックスはテキスト照合で対応付け、座標情報を可視化に使う
+    - 追加の API 呼び出しは不要
     """
-    deployment = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
-    client = _make_openai_client()
     out = _empty_result()
 
     boxes = lay_result.get("bounding_boxes", [])
     if not boxes:
         return out
 
-    # ボックスごとに重心座標を計算してリスト化（テキストは最大60文字）
-    box_list = []
-    for i, box in enumerate(boxes):
-        poly = box.get("polygon") or []
-        if len(poly) >= 4:
-            xs = poly[0::2]
-            ys = poly[1::2]
-            cx = round(sum(xs) / len(xs), 2)
-            cy = round(sum(ys) / len(ys), 2)
-        else:
-            cx, cy = 0.0, 0.0
-        box_list.append({
-            "i": i,
-            "t": (box.get("value") or "")[:60],
-            "p": box.get("page", 1),
-            "x": cx,
-            "y": cy,
-        })
+    # GPT Vision のフィールド値をそのまま採用
+    for key, _ in DISPLAY_FIELDS:
+        src = gpt_vision_result.get(key) or {}
+        if src.get("value"):
+            out[key] = {"value": src["value"], "confidence": None}
 
-    fields_desc = "\n".join(f"- {key}: {label}" for key, label in DISPLAY_FIELDS)
+    def _normalize(text: str) -> str:
+        """比較用に空白・記号・通貨記号を除去して小文字化。"""
+        return re.sub(r'[\s　¥￥,、。・〒()（）]', '', text or '').lower()
 
-    prompt = f"""\
-以下はPDF請求書からOCRで抽出したテキストボックスの一覧です。
-i=インデックス、t=テキスト、p=ページ番号、x/y=重心座標（インチ）。
-添付の画像も参照しながら、視覚的なレイアウトを踏まえて判断してください。
-
-【タスク1】全ボックスに簡潔な日本語ラベルを自由に付けてください。
-内容を表す短いラベルを付けてください（例:「会社名」「住所」「電話番号」「合計金額」「表の見出し」「品目」「日付」など）。
-
-【タスク2】以下のフィールドに対応するボックスのインデックスを特定してください。
-ラベル行ではなく実際の値が書かれているボックスを選び、見つからない場合は null にしてください。
-請求元・請求先の判別は、印鑑の位置・「御中」「様」との近接・レイアウト上の配置を視覚的に確認してください。
-{fields_desc}
-
-ボックス一覧:
-{json.dumps(box_list, ensure_ascii=False)}
-
-JSON形式で返してください:
-{{
-  "labels": {{"0": "ラベル", "1": "ラベル", ...}},
-  "fields": {{"vendor_name": 3, "customer_name": 7, "invoice_id": null, ...}}
-}}
-"""
-
-    # テキストプロンプト + PDF 全ページ画像をマルチモーダルで送信
-    content: list[dict] = [{"type": "text", "text": prompt}]
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    for page in doc:
-        pix = page.get_pixmap(matrix=fitz.Matrix(150 / 72, 150 / 72))
-        b64 = base64.b64encode(pix.tobytes("png")).decode()
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/png;base64,{b64}", "detail": "high"},
-        })
-    doc.close()
-
-    response = client.chat.completions.create(
-        model=deployment,
-        messages=[{"role": "user", "content": content}],
-        response_format={"type": "json_object"},
-        max_tokens=1500,
-    )
-
-    raw = response.choices[0].message.content
-    out["raw_fields"] = {"gpt_response": raw}
-
-    try:
-        gpt_result: dict = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        out["bounding_boxes"] = boxes
-        return out
-
-    free_labels: dict = gpt_result.get("labels") or {}
-    classification: dict = gpt_result.get("fields") or {}
-
-    # フィールド値の抽出と index→(label, color) マップの構築
+    # 各フィールド値に対応する OCR ボックスをテキスト照合で探す
     index_to_field: dict[int, tuple[str, str]] = {}
     for key, label in DISPLAY_FIELDS:
-        raw_idx = classification.get(key)
-        if raw_idx is None:
+        value = (out.get(key) or {}).get("value")
+        if not value:
             continue
-        try:
-            idx = int(raw_idx)
-        except (ValueError, TypeError):
+        norm_val = _normalize(value)
+        if not norm_val:
             continue
-        if 0 <= idx < len(boxes):
-            out[key] = {"value": boxes[idx].get("value", ""), "confidence": None}
-            index_to_field[idx] = (label, _FIELD_COLORS.get(key, "layout"))
 
-    # ボックスにラベルを付与（フィールド一致 → 色付き塗り、それ以外 → GPT自由ラベル＋グレー枠）
+        best_idx, best_score = None, 0.0
+        for i, box in enumerate(boxes):
+            norm_box = _normalize(box.get("value", ""))
+            if not norm_box:
+                continue
+            if norm_val in norm_box or norm_box in norm_val:
+                score = min(len(norm_val), len(norm_box)) / max(len(norm_val), len(norm_box), 1)
+                if score > best_score:
+                    best_score = score
+                    best_idx = i
+
+        if best_idx is not None and best_score >= 0.5:
+            index_to_field[best_idx] = (label, _FIELD_COLORS.get(key, "layout"))
+
+    # ボックスにラベルを付与（マッチ済み → 色付き塗り、未マッチ → テキスト先頭をラベルに）
     labeled: list[dict] = []
     for i, box in enumerate(boxes):
-        gpt_label = free_labels.get(str(i), "")
         if i in index_to_field:
             lbl, clr = index_to_field[i]
             labeled.append({**box, "label": lbl, "color": clr, "style": "filled"})
         else:
-            labeled.append({**box, "label": gpt_label})
+            labeled.append({**box, "label": (box.get("value") or "")[:20]})
 
     out["bounding_boxes"] = labeled
     return out
