@@ -290,28 +290,26 @@ def analyze_layout_gpt(lay_result: dict, gpt_vision_result: dict) -> dict:
     if not boxes:
         return out
 
-    # GPT Vision のフィールド値をそのまま採用
+    # GPT Vision の結果をそのまま採用（フィールド値 + 全テキストリスト）
     for key, _ in DISPLAY_FIELDS:
         src = gpt_vision_result.get(key) or {}
         if src.get("value"):
             out[key] = {"value": src["value"], "confidence": None}
+    out["gpt_items"] = gpt_vision_result.get("gpt_items") or []
 
     def _normalize(text: str) -> str:
         """比較用に空白・記号・通貨記号を除去して小文字化。"""
         return re.sub(r'[\s　¥￥,、。・〒()（）]', '', text or '').lower()
 
-    # 各フィールド値に対応する OCR ボックスをテキスト照合で探す
-    index_to_field: dict[int, tuple[str, str]] = {}
-    for key, label in DISPLAY_FIELDS:
-        value = (out.get(key) or {}).get("value")
-        if not value:
-            continue
+    def _best_match(value: str, exclude: set) -> int | None:
+        """value に最も近い OCR ボックスのインデックスを返す（exclude 済みは対象外）。"""
         norm_val = _normalize(value)
         if not norm_val:
-            continue
-
+            return None
         best_idx, best_score = None, 0.0
         for i, box in enumerate(boxes):
+            if i in exclude:
+                continue
             norm_box = _normalize(box.get("value", ""))
             if not norm_box:
                 continue
@@ -320,16 +318,41 @@ def analyze_layout_gpt(lay_result: dict, gpt_vision_result: dict) -> dict:
                 if score > best_score:
                     best_score = score
                     best_idx = i
+        return best_idx if best_score >= 0.5 else None
 
-        if best_idx is not None and best_score >= 0.5:
-            index_to_field[best_idx] = (label, _FIELD_COLORS.get(key, "layout"))
+    matched: set[int] = set()
 
-    # ボックスにラベルを付与（マッチ済み → 色付き塗り、未マッチ → テキスト先頭をラベルに）
+    # ① 定義済みフィールド（優先）: 色付き塗りボックス
+    index_to_field: dict[int, tuple[str, str]] = {}
+    for key, label in DISPLAY_FIELDS:
+        value = (out.get(key) or {}).get("value")
+        if not value:
+            continue
+        idx = _best_match(value, matched)
+        if idx is not None:
+            index_to_field[idx] = (label, "blue")
+            matched.add(idx)
+
+    # ② gpt_items の全アイテム: GPT ラベル付きグレー枠ボックス
+    index_to_gpt_label: dict[int, str] = {}
+    for item in out.get("gpt_items") or []:
+        value = item.get("value", "")
+        label = item.get("label", "")
+        if not value or not label:
+            continue
+        idx = _best_match(value, matched)
+        if idx is not None:
+            index_to_gpt_label[idx] = label
+            matched.add(idx)
+
+    # ボックスにラベルを付与
     labeled: list[dict] = []
     for i, box in enumerate(boxes):
         if i in index_to_field:
             lbl, clr = index_to_field[i]
             labeled.append({**box, "label": lbl, "color": clr, "style": "filled"})
+        elif i in index_to_gpt_label:
+            labeled.append({**box, "label": index_to_gpt_label[i], "color": "blue", "style": "outline"})
         else:
             labeled.append({**box, "label": (box.get("value") or "")[:20]})
 

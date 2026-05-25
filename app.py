@@ -163,9 +163,10 @@ def _show_gpt_panel(result: dict, source_label: str):
             value = field.get("value") or "—"
             st.markdown(f"**{label}**: {value}")
 
-    with st.expander("生データ（GPT レスポンス JSON）"):
-        raw = (result.get("raw_fields") or {}).get("gpt_response", "")
-        st.text(raw)
+    raw = (result.get("raw_fields") or {}).get("gpt_response", "")
+    if raw:
+        with st.expander("生データ（GPT レスポンス JSON）"):
+            st.text(raw)
 
 
 def _show_comparison_table(lay_gpt: dict, gpt_vision: dict):
