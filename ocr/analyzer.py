@@ -104,11 +104,18 @@ _FIELD_COLORS: dict[str, str] = {
 
 # GPT に渡すフィールド抽出プロンプト（テキスト・画像共通）
 _EXTRACTION_PROMPT = """\
-請求書から以下のフィールドを抽出し、JSONのみを返してください（説明文不要）。
-値が見つからない場合は null を設定してください。
-また、上記以外で請求書に記載されている重要な情報があれば other_fields に追加してください。
+請求書のPDF画像から、読み取れるすべての文章・文字を抽出してください。
+ヘッダー・本文・表の内容・フッター・印鑑テキストなど、すべての情報を対象にしてください。
+各テキストに簡潔な日本語ラベルを付けて items に列挙してください。
 
+また、以下の定義済みフィールドも個別に抽出してください（モデル比較用。値が見つからない場合は null）。
+
+JSONのみを返してください（説明文不要）:
 {
+  "items": [
+    {"label": "ラベル", "value": "読み取ったテキスト"},
+    ...
+  ],
   "vendor_name": "請求元会社名",
   "customer_name": "請求先会社名（御中・様を除く）",
   "invoice_id": "請求書番号",
@@ -117,8 +124,7 @@ _EXTRACTION_PROMPT = """\
   "invoice_total": "合計金額",
   "sub_total": "小計",
   "total_tax": "消費税額",
-  "amount_due": "支払残高",
-  "other_fields": [{"label": "ラベル", "value": "値"}, ...]
+  "amount_due": "支払残高"
 }\
 """
 
@@ -139,7 +145,7 @@ def _make_openai_client() -> OpenAI:
 
 def _empty_result() -> dict:
     out = {k: {"value": None, "confidence": None} for k, _ in DISPLAY_FIELDS}
-    out.update({"items": [], "bounding_boxes": [], "raw_fields": {}, "other_fields": []})
+    out.update({"items": [], "bounding_boxes": [], "raw_fields": {}, "gpt_items": []})
     return out
 
 
@@ -152,10 +158,10 @@ def _parse_gpt_response(content: str) -> dict:
             val = data.get(key)
             if val is not None:
                 out[key] = {"value": str(val), "confidence": None}
-        other = data.get("other_fields")
-        if isinstance(other, list):
-            out["other_fields"] = [
-                item for item in other
+        raw_items = data.get("items")
+        if isinstance(raw_items, list):
+            out["gpt_items"] = [
+                item for item in raw_items
                 if isinstance(item, dict) and item.get("label") and item.get("value")
             ]
     except (json.JSONDecodeError, AttributeError, TypeError):
@@ -415,7 +421,7 @@ def analyze_gpt_vision(pdf_bytes: bytes) -> dict:
         model=deployment,
         messages=[{"role": "user", "content": content}],
         response_format={"type": "json_object"},
-        max_tokens=1000,
+        max_tokens=3000,
     )
     return _parse_gpt_response(response.choices[0].message.content)
 

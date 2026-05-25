@@ -146,21 +146,22 @@ def _show_layout_panel(result: dict):
 
 
 def _show_gpt_panel(result: dict, source_label: str):
-    """右パネル: GPT 抽出フィールド（信頼度なし）+ その他情報 + 生レスポンス。"""
-    st.markdown(f"**抽出フィールド（{source_label}）**")
+    """右パネル: GPT 全文OCR結果（gpt_items）またはフィールド一覧 + 生レスポンス。"""
+    st.markdown(f"**抽出結果（{source_label}）**")
     st.divider()
 
-    for key, label in DISPLAY_FIELDS:
-        field = result.get(key) or {}
-        value = field.get("value") or "—"
-        st.markdown(f"**{label}**: {value}")
-
-    other_fields = result.get("other_fields") or []
-    if other_fields:
-        st.divider()
-        st.markdown("**その他の情報**")
-        for item in other_fields:
-            st.markdown(f"**{item['label']}**: {item['value']}")
+    gpt_items = result.get("gpt_items") or []
+    if gpt_items:
+        st.dataframe(
+            pd.DataFrame(gpt_items).rename(columns={"label": "ラベル", "value": "テキスト"}),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        for key, label in DISPLAY_FIELDS:
+            field = result.get(key) or {}
+            value = field.get("value") or "—"
+            st.markdown(f"**{label}**: {value}")
 
     with st.expander("生データ（GPT レスポンス JSON）"):
         raw = (result.get("raw_fields") or {}).get("gpt_response", "")
